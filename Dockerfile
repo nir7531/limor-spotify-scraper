@@ -13,8 +13,9 @@ RUN npm ci
 RUN npx agent-browser install --with-deps
 
 ENV AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage"
+ENV ANTHROPIC_API_KEY=""
 
 COPY . .
 RUN npm run build
 
-CMD ["node", "dist/scraper.js"]
+CMD ["node", "dist/server.js"]

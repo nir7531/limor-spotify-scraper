@@ -4,11 +4,13 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/scraper.js",
-    "dev": "tsx src/scraper.ts",
-    "serve": "node dist/server.js"
+    "start": "node dist/server.js",
+    "scrape": "node dist/run-scraper.js",
+    "dev": "tsx src/server.ts",
+    "dev:scrape": "tsx src/run-scraper.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "agent-browser": "latest",
     "express": "^4.18.2",
     "pg": "^8.12.0",

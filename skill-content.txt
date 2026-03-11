@@ -1,0 +1,311 @@
+## Execution Flow
+
+Work through these phases sequentially. After every `click`, `fill`, or navigation action, **always re-snapshot** (`agent-browser snapshot -i`) before trying to interact with new elements — refs become invalid when the page changes.
+
+After every dropdown change or tab switch, **wait 3 seconds** (`agent-browser wait 3000`) for the SPA to update its data before extracting.
+
+### Phase 0: Setup & Auth
+
+```bash
+agent-browser --state <AUTH_PATH> open https://creators.spotify.com
+agent-browser wait 3000
+agent-browser snapshot -i
+```
+
+The `--state` flag loads saved cookies/session automatically. Do NOT use `--headed` — we are running headless.
+
+Verify you see the dashboard (look for "Your shows" or show names in the snapshot). If you see a login/landing page instead, run the **Auth Recovery** flow below before continuing.
+
+#### Auth Recovery (automated re-login)
+
+If the saved session has expired and you see a login page:
+
+1. Credentials are available as environment variables: SPOTIFY_CREATORS_EMAIL and SPOTIFY_CREATORS_PASSWORD. Use them directly in commands.
+
+2. The login flow has multiple steps. Follow this exact sequence:
+
+   **Step 1**: Click "Log in" on the landing page, then "Continue with Spotify":
+   ```bash
+   agent-browser snapshot -i
+   # Look for "Log in" link → click it
+   agent-browser click @<login-ref>
+   agent-browser wait 2000
+   agent-browser snapshot -i
+   # Look for "Continue with Spotify" → click it
+   agent-browser click @<continue-spotify-ref>
+   agent-browser wait 2000
+   agent-browser snapshot -i
+   ```
+
+   **Step 2**: Spotify will show a 6-digit code entry page. **Do NOT use the code flow.** Click "Log in with a password" instead:
+   ```bash
+   # Look for "Log in with a password" button → click it
+   agent-browser click @<password-login-ref>
+   agent-browser wait 2000
+   agent-browser snapshot -i
+   ```
+
+   **Step 3**: Fill email and password on the password form:
+   ```bash
+   agent-browser fill @<email-field-ref> "$SPOTIFY_CREATORS_EMAIL"
+   agent-browser fill @<password-field-ref> "$SPOTIFY_CREATORS_PASSWORD"
+   agent-browser click @<login-button-ref>
+   agent-browser wait 5000
+   agent-browser snapshot -i
+   ```
+
+   **IMPORTANT**: Always use password login, never the email code flow. The code flow sends a 6-digit code to the email which requires manual intervention.
+
+3. After successful login, **save the new auth state**:
+   ```bash
+   agent-browser state save <AUTH_PATH>
+   ```
+
+4. Verify you're now on the dashboard, then continue with Phase 1.
+
+**If re-login fails** (wrong password, CAPTCHA, 2FA prompt): Stop immediately and call report_data with status "failed" and a note explaining what happened.
+
+### Phase 1: Navigate to the Podcast
+
+The dashboard opens to whichever show was last viewed. To switch to the target podcast:
+
+1. Click "All shows" in the left sidebar to open the show picker:
+```bash
+agent-browser snapshot -i
+# Look for "All shows" button in sidebar
+agent-browser click @<all-shows-ref>
+agent-browser wait 2000
+agent-browser snapshot -i
+```
+
+2. A panel appears with a search box and a list of shows. Fill the search box with the podcast name:
+```bash
+# Look for textbox "Search" in the snapshot
+agent-browser fill @<search-ref> "<podcast name>"
+agent-browser wait 2000
+agent-browser snapshot -i
+```
+
+3. The list filters to matching shows. Use a **full snapshot** (not `-i`) to see show names inside button groups. Click the matching show:
+```bash
+agent-browser snapshot
+# Look for the show name in a button or group element
+agent-browser click @<show-ref>
+agent-browser wait 3000
+agent-browser snapshot -i
+```
+
+4. Verify you're on the show's home page — the show name should appear at the top, with "Overview" heading and sidebar with "Analytics" link.
+
+**Edge case — show not found:** If the search returns no matching results, call report_data with status "failed" and note the exact search term and visible results.
+
+### Phase 2: Navigate to Analytics
+
+From the show's home page, click the "More analytics" link (found below the "On Spotify" overview section). **Do NOT click "Analytics" in the left sidebar** — that can trigger a share dialog instead.
+
+```bash
+# Look for link "More analytics" in the snapshot
+agent-browser click @<more-analytics-ref>
+agent-browser wait 3000
+agent-browser snapshot -i
+```
+
+You should now be on the full Analytics page with tabs: **Overview** (selected) | Discovery | Audience | Episode rankings. Verify the URL contains `/analytics/show/`.
+
+### Phase 3: Overview Tab — On Spotify Stats
+
+The Overview tab has two data sections: "On Spotify" (top) and "All platforms" (bottom).
+
+**"On Spotify" section** has a time period dropdown. Extract data for each period:
+
+For each period in `["Last 7 days", "Last 30 days", "Last 90 days", "All time"]`:
+
+1. Click the time period dropdown (near "On Spotify" heading, top right)
+2. Wait for options, snapshot, select the target period
+3. Wait 3 seconds for data to refresh
+4. **Take a screenshot** to read the numbers:
+   ```bash
+   agent-browser screenshot ./spotify-overview-<period>.png
+   ```
+5. Extract from the screenshot:
+   - **Plays** — integer (strip commas)
+   - **Consumption hours** — integer (shown as e.g., "83")
+   - **Followers** — integer with +/- prefix (e.g., "+14")
+
+**IMPORTANT — Plays counter bug**: The Plays metric uses a CSS rolling-digit animation. `agent-browser get text` returns garbage like `"Plays012345678901234567890123456789Last 30 days"` instead of the actual number. **Always use screenshots** to read the Plays value. Consumption hours and Followers can be read via `get text` on their toggle buttons, but screenshots are more reliable for all three.
+
+```bash
+# Consumption hours and Followers CAN be read via get text (backup method):
+agent-browser get text @<consumption-hours-toggle-ref>
+# Returns: "Consumption hours83Last 30 days" → parse 83
+agent-browser get text @<followers-toggle-ref>
+# Returns: "Followers+14Last 30 days" → parse +14
+```
+
+### Phase 4: Overview Tab — All Platforms Stats
+
+Scroll down to the "All platforms" section.
+
+```bash
+agent-browser scroll down 800
+agent-browser wait 1000
+agent-browser screenshot ./spotify-overview-allplatforms.png
+```
+
+The "Total" and "Per episode" summary numbers are **always All-time** regardless of any dropdown. The "Streams & downloads" dropdown only controls the chart below, not the summary numbers. So just extract the two summary values once:
+
+- **Total** streams (all-time, e.g., "588")
+- **Per episode** average (e.g., "56")
+
+### Phase 5: Discovery Tab
+
+Scroll back to top. Click the "Discovery" tab:
+```bash
+agent-browser scroll up 5000
+agent-browser snapshot -i
+agent-browser click @<discovery-tab-ref>
+agent-browser wait 3000
+agent-browser snapshot -i
+```
+
+Discovery stats are **monthly** (no period dropdown). Extract:
+
+**5a. "How traffic led to consumption" funnel:**
+- People you reached (integer)
+- People who showed interest (integer)
+- People who consumed (integer)
+- Reach-to-interest conversion rate (percentage, e.g., "12.2%")
+- Interest-to-consumption conversion rate (percentage, e.g., "55.8%")
+- Date range (e.g., "Feb 8 – Mar 9")
+
+**5b. Key Stats box** (right side of funnel):
+- Headline text (e.g., "541 people consumed your content Feb 8 – Mar 9")
+- Consumption hours per person (decimal, e.g., 0.9)
+- Percentage that follow your show (percentage, e.g., "17%")
+
+**Efficient approach**: After the initial snapshot for the funnel and key stats, do a **full snapshot** (without `-i`) which captures all Discovery data including Traffic and Clips in one go:
+```bash
+agent-browser snapshot
+```
+
+**5c. Traffic section** (from full snapshot):
+- Spotify impressions total (integer, e.g., 3509)
+- Traffic date range
+- Source breakdown (look for `img` element with values like `Home Search Library Other Spotify Features 1,989 1,454 66 0`):
+  - Home (integer)
+  - Search (integer)
+  - Library (integer)
+  - Other Spotify Features (integer)
+
+**5d. Clips section** (from full snapshot — look for table with columns Name, Impressions, Plays from clips):
+For each clip row (up to 3):
+- Clip name (full text from cell)
+- Date and duration (e.g., "Feb 4, 2026 • 32 seconds")
+- Impressions (integer)
+- Plays from clips (integer)
+
+### Phase 6: Audience Tab
+
+Scroll back to top. Click the "Audience" tab:
+```bash
+agent-browser scroll up 5000
+agent-browser snapshot -i
+agent-browser click @<audience-tab-ref>
+agent-browser wait 3000
+agent-browser snapshot -i
+```
+
+**6a. Audience Demographics** — has a time period dropdown.
+
+For each period in `["Last 7 days", "Last 30 days", "Last 90 days", "All time"]`:
+
+1. Switch dropdown, wait 3 seconds, snapshot
+2. Extract **Gender** breakdown:
+   - Male (percentage)
+   - Female (percentage)
+   - Non-binary (percentage)
+   - Not specified (percentage)
+3. Extract **Age** breakdown:
+   - 0-17, 18-22, 23-27, 28-34, 35-44, 45-59, 60+, Unknown (all percentages)
+
+**6b. Scroll down — All Platforms section:**
+```bash
+agent-browser scroll down 1000
+agent-browser wait 1000
+agent-browser snapshot -i
+```
+
+- **Geographic location** — Top 5 countries with percentages
+- **Platforms** — App breakdown (e.g., Apple Podcasts 11.6%, Spotify 86.3%, Other 2.1%)
+
+### Phase 7: Episode Rankings Tab
+
+Scroll back to top. Click the "Episode rankings" tab:
+```bash
+agent-browser scroll up 5000
+agent-browser snapshot -i
+agent-browser click @<episode-rankings-tab-ref>
+agent-browser wait 3000
+```
+
+**IMPORTANT**: Episode rankings are rendered as a **horizontal bar chart image**, not an HTML table. The accessibility tree contains episode names (in an `img` alt text) but **not the stream counts**. You must take a screenshot to read the numbers:
+
+```bash
+agent-browser screenshot ./spotify-episode-rankings.png
+```
+
+From the screenshot, extract for each visible episode (up to 10):
+- **Rank** (1-N, based on bar position from top to bottom)
+- **Episode name** (full text, shown to the left of each bar)
+- **Episode number** (parse from name — look for "פרק N" pattern)
+- **Streams** count (integer, shown to the right of each bar)
+
+### Phase 8: Compile & Close
+
+1. Close the browser: `agent-browser close`
+2. Save auth state if login was refreshed: `agent-browser state save <AUTH_PATH>`
+3. Call report_data with the complete structured JSON and status "completed" (or "partial" if any sections failed)
+
+## Error Handling
+
+| Scenario | Action |
+|---|---|
+| Auth expired (login page appears) | Run the Auth Recovery flow (Phase 0). Use password login, never email code. Save new auth state after success. If password login fails (CAPTCHA, wrong password), stop and report via report_data with status "failed". |
+| Show not found in search | Stop. Report via report_data with status "failed" and exact search term. |
+| Element ref not found after snapshot | Re-snapshot once. If still missing, skip that data point, continue to next phase. |
+| Page timeout (>30s) | Retry navigation once. If still fails, report via report_data with status "failed". |
+| Dropdown option not available | Some periods may not exist for new shows. Skip that period, log it. |
+| Numbers show "--" or "Not enough data" | Store as null in the output. |
+| CAPTCHA or rate limit | Stop immediately. Report via report_data with status "failed". |
+
+## Data Parsing Rules
+
+- **Commas in numbers**: Strip commas → parse as integer. "3,681" → 3681
+- **Hours suffix**: "650h" → 650 (integer)
+- **Plus/minus prefix**: "+48" → 48, "-12" → -12
+- **Percentages**: "65.2%" → 0.652 (decimal). "12.2% conversion rate" → 0.122
+- **Hebrew episode numbers**: Look for "פרק N" pattern where N is the episode number
+- **Date ranges**: Store as-is (text), e.g., "Feb 8 – Mar 9"
+
+## Important Notes
+
+- **One podcast per run.** Focus on accuracy for a single scrape.
+- **Re-snapshot after every interaction.** Refs are invalidated by any page change.
+- **Wait after every data-changing action.** Spotify's SPA needs time to fetch and render new data.
+- **Partial data is better than no data.** If one section fails, continue to the next. Mark the scan as `partial`.
+
+## Known Quirks
+
+1. **Plays counter CSS animation**: The Plays metric uses rolling digits. `get text` returns all digit frames concatenated. Always use screenshots to read Plays values.
+
+2. **Episode rankings are a chart, not a table**: The "Episode rankings" tab renders a horizontal bar chart as an `<img>` element. Always take a screenshot for this tab.
+
+3. **"All platforms" summary is always All-time**: The Total streams and Per episode average don't change with the dropdown. Extract once.
+
+4. **Login flow requires password path**: Spotify defaults to a 6-digit email code flow. You must click "Log in with a password" to get the email+password form.
+
+5. **"Analytics" sidebar button vs "More analytics" link**: Clicking "Analytics" in the left sidebar may trigger a share dialog. Use "More analytics" link instead.
+
+6. **Show picker**: Use "All shows" → Search box. Use a full snapshot (not `-i`) to see show names inside button groups.
+
+7. **Cookie consent dialog**: A privacy/cookie dialog may appear. Close it if visible (`button "Close"` at the bottom of the page).

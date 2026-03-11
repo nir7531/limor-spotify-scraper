@@ -1,10 +1,15 @@
 // scraper/src/scraper.ts
-// Main scraper: queries groups with spotify_show_name, runs agent-browser per show
+// Main scraper: queries groups with spotify_show_name, runs LLM-orchestrated scrape per show
 
-import { query, queryOne, closePool } from './db.js';
+import {
+  query, queryOne, closePool,
+  insertOverviewSpotify, insertOverviewAllPlatforms,
+  insertDiscovery, insertDiscoveryClip,
+  insertAudienceDemographics, insertAudienceGeo, insertAudiencePlatform,
+  insertEpisodeRanking,
+} from './db.js';
 import { notifyAdmin } from './notify.js';
-import { execSync } from 'child_process';
-import * as fs from 'fs';
+import { orchestrateScrape, ScrapeResult } from './orchestrator.js';
 
 interface ShowToScrape {
   id: string;
@@ -35,8 +40,115 @@ async function getNextScanNumber(groupId: string): Promise<number> {
   return row?.next ?? 1;
 }
 
-async function scrapeShow(show: ShowToScrape): Promise<'completed' | 'partial' | 'failed'> {
+/** Insert all scraped data into the analytics tables */
+async function insertScrapeData(scanId: string, result: ScrapeResult): Promise<void> {
+  // Overview — On Spotify
+  if (result.overview?.on_spotify) {
+    for (const [period, data] of Object.entries(result.overview.on_spotify)) {
+      if (data) await insertOverviewSpotify(scanId, period, data);
+    }
+  }
+
+  // Overview — All Platforms
+  if (result.overview?.all_platforms) {
+    for (const [period, data] of Object.entries(result.overview.all_platforms)) {
+      if (data) await insertOverviewAllPlatforms(scanId, period, data);
+    }
+  }
+
+  // Discovery
+  if (result.discovery) {
+    const d = result.discovery;
+    await insertDiscovery(scanId, {
+      date_range: d.date_range,
+      funnel_reached: d.funnel?.reached,
+      funnel_interested: d.funnel?.interested,
+      funnel_consumed: d.funnel?.consumed,
+      funnel_reach_to_interest_pct: d.funnel?.reach_to_interest_pct,
+      funnel_interest_to_consumed_pct: d.funnel?.interest_to_consumed_pct,
+      key_stats_headline: d.key_stats?.headline,
+      key_stats_hours_per_person: d.key_stats?.hours_per_person,
+      key_stats_follow_pct: d.key_stats?.follow_pct,
+      traffic_impressions_total: d.traffic?.impressions_total,
+      traffic_source_home: d.traffic?.source_home,
+      traffic_source_search: d.traffic?.source_search,
+      traffic_source_library: d.traffic?.source_library,
+      traffic_source_other: d.traffic?.source_other,
+    });
+
+    // Discovery clips
+    if (Array.isArray(d.clips)) {
+      for (const clip of d.clips) {
+        await insertDiscoveryClip(scanId, {
+          clip_rank: clip.rank,
+          clip_name: clip.name,
+          clip_date: clip.date,
+          clip_duration_seconds: clip.duration_seconds,
+          impressions: clip.impressions,
+          plays_from_clips: clip.plays_from_clips,
+        });
+      }
+    }
+  }
+
+  // Audience demographics
+  if (result.audience?.demographics) {
+    for (const [period, data] of Object.entries(result.audience.demographics) as [string, any][]) {
+      if (!data?.gender && !data?.age) continue;
+      await insertAudienceDemographics(scanId, period, {
+        gender_male: data.gender?.male,
+        gender_female: data.gender?.female,
+        gender_non_binary: data.gender?.non_binary,
+        gender_not_specified: data.gender?.not_specified,
+        age_0_17: data.age?.['0_17'],
+        age_18_22: data.age?.['18_22'],
+        age_23_27: data.age?.['23_27'],
+        age_28_34: data.age?.['28_34'],
+        age_35_44: data.age?.['35_44'],
+        age_45_59: data.age?.['45_59'],
+        age_60_plus: data.age?.['60_plus'],
+        age_unknown: data.age?.unknown,
+      });
+    }
+  }
+
+  // Audience geo
+  if (Array.isArray(result.audience?.geographic)) {
+    for (const geo of result.audience.geographic) {
+      await insertAudienceGeo(scanId, {
+        rank: geo.rank,
+        country: geo.country,
+        percentage: geo.pct,
+      });
+    }
+  }
+
+  // Audience platforms
+  if (Array.isArray(result.audience?.platforms)) {
+    for (const plat of result.audience.platforms) {
+      await insertAudiencePlatform(scanId, {
+        platform_name: plat.name,
+        percentage: plat.pct,
+      });
+    }
+  }
+
+  // Episode rankings
+  if (Array.isArray(result.episode_rankings)) {
+    for (const ep of result.episode_rankings) {
+      await insertEpisodeRanking(scanId, {
+        rank: ep.rank,
+        episode_name: ep.episode_name,
+        episode_number: ep.episode_number,
+        streams: ep.streams,
+      });
+    }
+  }
+}
+
+export async function scrapeShow(show: ShowToScrape): Promise<'completed' | 'partial' | 'failed'> {
   const scanNumber = await getNextScanNumber(show.id);
+  const authPath = process.env.SPOTIFY_AUTH_PATH ?? './spotify-auth.json';
 
   // Create scan record
   const scan = await queryOne<{ id: string }>(
@@ -47,57 +159,40 @@ async function scrapeShow(show: ShowToScrape): Promise<'completed' | 'partial' |
   if (!scan) throw new Error('Failed to create scan record');
   const scanId = scan.id;
 
+  console.log(`Scraping: ${show.spotify_show_name} (scan #${scanNumber}, id=${scanId})`);
+
   try {
-    // Build agent-browser command
-    // The spotify-analytics skill handles the actual scraping
-    // This is a placeholder — the actual command depends on the skill implementation
-    const authPath = process.env.SPOTIFY_AUTH_PATH ?? './spotify-auth.json';
-    const showUrl = show.spotify_show_url ?? '';
+    const result = await orchestrateScrape(
+      show.spotify_show_name,
+      show.spotify_show_url,
+      scanId,
+      authPath
+    );
 
-    // TODO: Invoke agent-browser with the spotify-analytics skill
-    // The exact command will be:
-    // agent-browser run --skill spotify-analytics --args '{"show_name": "...", "show_url": "...", "scan_id": "...", "auth_path": "..."}'
-    //
-    // For now, this is a placeholder that will be completed when the skill is updated
-    console.log(`Scraping: ${show.spotify_show_name} (scan ${scanNumber})`);
-
-    // After successful scrape: save spotify_show_url if discovered during fuzzy search
-    // (the agent-browser skill outputs the discovered URL)
-    // if (!show.spotify_show_url && discoveredUrl) {
-    //   await query('UPDATE groups SET spotify_show_url = $1 WHERE id = $2', [discoveredUrl, show.id]);
-    // }
+    // Insert data into analytics tables
+    if (result.scan_status !== 'failed') {
+      await insertScrapeData(scanId, result);
+    }
 
     // Update scan status
     await query(
-      `UPDATE podcast_scans SET scan_status = 'completed' WHERE id = $1`,
-      [scanId]
+      `UPDATE podcast_scans SET scan_status = $2, notes = $3 WHERE id = $1`,
+      [scanId, result.scan_status, result.notes?.slice(0, 500) ?? null]
     );
 
-    return 'completed';
+    console.log(`  Result: ${result.scan_status}${result.notes ? ` — ${result.notes}` : ''}`);
+    return result.scan_status;
   } catch (err: any) {
-    // Retry once
-    try {
-      console.log(`Retrying: ${show.spotify_show_name}`);
-      // TODO: Same agent-browser invocation
-      await query(
-        `UPDATE podcast_scans SET scan_status = 'completed' WHERE id = $1`,
-        [scanId]
-      );
-      return 'completed';
-    } catch (retryErr: any) {
-      await query(
-        `UPDATE podcast_scans SET scan_status = 'failed', notes = $2 WHERE id = $1`,
-        [scanId, retryErr.message?.slice(0, 500) ?? 'Unknown error']
-      );
-      return 'failed';
-    }
+    console.error(`  Fatal error scraping ${show.spotify_show_name}:`, err.message);
+    await query(
+      `UPDATE podcast_scans SET scan_status = 'failed', notes = $2 WHERE id = $1`,
+      [scanId, err.message?.slice(0, 500) ?? 'Unknown error']
+    );
+    return 'failed';
   }
 }
 
-async function main() {
-  console.log('Starting Spotify analytics scraper...');
-
-  // Get all shows to scrape
+export async function scrapeAll(): Promise<{ completed: number; partial: number; failed: number; failures: string[] }> {
   const shows = await query<ShowToScrape>(
     `SELECT id, spotify_show_name, spotify_show_url FROM groups
      WHERE spotify_show_name IS NOT NULL AND is_activated = true`
@@ -105,31 +200,24 @@ async function main() {
 
   if (shows.length === 0) {
     console.log('No shows to scrape');
-    await closePool();
-    return;
+    return { completed: 0, partial: 0, failed: 0, failures: [] };
   }
 
-  // Randomize order
   shuffle(shows);
   console.log(`Scraping ${shows.length} shows...`);
 
   let completed = 0;
+  let partial = 0;
   let failed = 0;
   const failures: string[] = [];
 
   for (const show of shows) {
-    try {
-      const result = await scrapeShow(show);
-      if (result === 'failed') {
-        failed++;
-        failures.push(show.spotify_show_name);
-      } else {
-        completed++;
-      }
-    } catch (err: any) {
+    const result = await scrapeShow(show);
+    if (result === 'completed') completed++;
+    else if (result === 'partial') partial++;
+    else {
       failed++;
       failures.push(show.spotify_show_name);
-      console.error(`Error scraping ${show.spotify_show_name}:`, err);
     }
 
     // Random delay 2-5 minutes between shows
@@ -138,26 +226,7 @@ async function main() {
     }
   }
 
-  // Save auth state to volume for persistence across runs
-  // TODO: Save agent-browser auth state to SPOTIFY_AUTH_PATH
-  // The exact API depends on agent-browser: e.g., browser.saveAuthState(authPath)
-  const authPath = process.env.SPOTIFY_AUTH_PATH ?? './spotify-auth.json';
-  console.log(`Auth state should be saved to: ${authPath}`);
-
-  // Notify admin
-  let msg = `✅ סריקת ספוטיפיי הושלמה — ${completed}/${shows.length} הצליחו`;
-  if (failed > 0) {
-    msg += `, ${failed} נכשלו: ${failures.join(', ')}`;
-  }
-  await notifyAdmin(msg);
-
-  console.log(`Done. Completed: ${completed}, Failed: ${failed}`);
-  await closePool();
+  return { completed, partial, failed, failures };
 }
 
-main().catch(async (err) => {
-  console.error('Scraper fatal error:', err);
-  await notifyAdmin(`❌ שגיאה חמורה בסריקת ספוטיפיי: ${err.message}`);
-  await closePool();
-  process.exit(1);
-});
+// Note: This module only exports functions. For standalone execution, use run-scraper.ts.
