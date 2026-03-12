@@ -19,5 +19,6 @@ ENV ANTHROPIC_API_KEY=""
 
 COPY . .
 RUN pnpm run build
+RUN cp src/research-skill-content.txt dist/research-skill-content.txt
 
 CMD ["node", "dist/server.js"]
