@@ -1,7 +1,12 @@
 // scraper/src/db.ts
 import pg from 'pg';
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
 
 export async function query<T = any>(sql: string, params?: any[]): Promise<T[]> {
   const { rows } = await pool.query(sql, params);
@@ -175,4 +180,213 @@ export async function insertEpisodeRanking(
        episode_name=EXCLUDED.episode_name, episode_number=EXCLUDED.episode_number, streams=EXCLUDED.streams`,
     [scanId, episode.rank, episode.episode_name, episode.episode_number ?? null, episode.streams]
   );
+}
+
+// ---- Research CRUD functions ----
+
+export async function upsertResearch(
+  groupId: string,
+  researchType: string,
+  researchData: any,
+  sourceQueries: string[]
+): Promise<{ id: string }> {
+  const rows = await query<{ id: string }>(
+    `INSERT INTO podcast_research (group_id, research_type, research_data, source_queries)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (group_id, research_type) DO UPDATE SET
+       research_data = EXCLUDED.research_data,
+       source_queries = EXCLUDED.source_queries,
+       refreshed_at = now()
+     RETURNING id`,
+    [groupId, researchType, JSON.stringify(researchData), JSON.stringify(sourceQueries)]
+  );
+  return rows[0];
+}
+
+export async function snapshotResearch(researchId: string): Promise<void> {
+  // Copy current research_data to history
+  await query(
+    `INSERT INTO podcast_research_history (research_id, research_data)
+     SELECT id, research_data FROM podcast_research WHERE id = $1`,
+    [researchId]
+  );
+  // Keep only the 12 most recent history entries
+  await query(
+    `DELETE FROM podcast_research_history
+     WHERE research_id = $1
+       AND id NOT IN (
+         SELECT id FROM podcast_research_history
+         WHERE research_id = $1
+         ORDER BY created_at DESC
+         LIMIT 12
+       )`,
+    [researchId]
+  );
+}
+
+export async function getResearchForGroup(groupId: string): Promise<any[]> {
+  return query(
+    `SELECT * FROM podcast_research WHERE group_id = $1 ORDER BY research_type`,
+    [groupId]
+  );
+}
+
+export async function getLastResearchDate(groupId: string): Promise<{ last_research: string | null } | null> {
+  return queryOne(
+    `SELECT MAX(refreshed_at) as last_research FROM podcast_research WHERE group_id = $1`,
+    [groupId]
+  );
+}
+
+export async function getScansSinceLastResearch(groupId: string): Promise<number> {
+  const row = await queryOne<{ count: string }>(
+    `SELECT COUNT(*) as count
+     FROM podcast_scans ps
+     WHERE ps.group_id = $1
+       AND ps.status = 'completed'
+       AND ps.scan_date > COALESCE(
+         (SELECT MAX(pr.refreshed_at) FROM podcast_research pr WHERE pr.group_id = $1),
+         '1970-01-01'
+       )`,
+    [groupId]
+  );
+  return row ? parseInt(row.count, 10) : 0;
+}
+
+export async function getGroupsNeedingResearch(): Promise<any[]> {
+  return query(
+    `SELECT g.id, g.chat_id, g.client_name, g.podcast_category
+     FROM groups g
+     WHERE g.is_activated = TRUE
+     AND g.group_type = 'client'
+     AND (
+       -- New clients: have scans but no research
+       (EXISTS (SELECT 1 FROM podcast_scans ps WHERE ps.group_id = g.id AND ps.status = 'completed')
+        AND NOT EXISTS (SELECT 1 FROM podcast_research pr WHERE pr.group_id = g.id))
+       OR
+       -- Existing clients: 4+ scans since last research
+       (SELECT COUNT(*) FROM podcast_scans ps
+        WHERE ps.group_id = g.id AND ps.status = 'completed'
+        AND ps.scan_date > COALESCE(
+          (SELECT MAX(pr.refreshed_at) FROM podcast_research pr WHERE pr.group_id = g.id),
+          '1970-01-01'
+        )) >= 4
+     )`
+  );
+}
+
+export async function updateGroupCategory(groupId: string, category: string): Promise<void> {
+  await query(
+    `UPDATE groups SET podcast_category = $2 WHERE id = $1`,
+    [groupId, category]
+  );
+}
+
+export async function updateResearchBrief(groupId: string, brief: string): Promise<void> {
+  await query(
+    `UPDATE groups SET research_brief = $2, research_brief_at = now() WHERE id = $1`,
+    [groupId, brief]
+  );
+}
+
+export async function setFirstResearchCompleted(groupId: string): Promise<void> {
+  await query(
+    `UPDATE groups SET first_research_completed_at = now() WHERE id = $1 AND first_research_completed_at IS NULL`,
+    [groupId]
+  );
+}
+
+export async function upsertGuestHistory(
+  groupId: string,
+  episodes: Array<{
+    episode_name: string;
+    guest_name: string | null;
+    episode_type: string;
+    streams_and_downloads?: number;
+    scanId?: string;
+  }>
+): Promise<void> {
+  if (episodes.length === 0) return;
+
+  // Build a single multi-row upsert to avoid N+1 round-trips
+  const params: any[] = [];
+  const valueClauses = episodes.map((ep, i) => {
+    const base = i * 6;
+    params.push(
+      groupId,
+      ep.episode_name,
+      ep.guest_name ?? null,
+      ep.episode_type,
+      ep.streams_and_downloads ?? null,
+      ep.scanId ?? null,
+    );
+    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+  });
+
+  await query(
+    `INSERT INTO podcast_guest_history (group_id, episode_name, guest_name, episode_type, streams_and_downloads, scan_id)
+     VALUES ${valueClauses.join(', ')}
+     ON CONFLICT (group_id, episode_name) DO UPDATE SET
+       guest_name = EXCLUDED.guest_name,
+       episode_type = EXCLUDED.episode_type,
+       streams_and_downloads = EXCLUDED.streams_and_downloads,
+       scan_id = EXCLUDED.scan_id`,
+    params
+  );
+}
+
+export async function getGuestHistory(groupId: string): Promise<any[]> {
+  return query(
+    `SELECT * FROM podcast_guest_history WHERE group_id = $1 ORDER BY streams_and_downloads DESC NULLS LAST`,
+    [groupId]
+  );
+}
+
+export async function getEpisodeTitlesForGroup(groupId: string): Promise<{ episode_name: string }[]> {
+  return query(
+    `SELECT DISTINCT episode_name FROM podcast_episode_rankings WHERE group_id = $1`,
+    [groupId]
+  );
+}
+
+export async function logResearchAudit(params: {
+  groupId: string;
+  auditType: string;
+  model: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  promptSummary?: string;
+  responseSummary?: string;
+  fullPrompt?: string;
+  fullResponse?: string;
+  durationMs?: number;
+  success: boolean;
+  errorMessage?: string;
+}): Promise<void> {
+  // Fire-and-forget — do not await in hot paths
+  query(
+    `INSERT INTO research_audit_log (
+       group_id, audit_type, model,
+       input_tokens, output_tokens,
+       prompt_summary, response_summary,
+       full_prompt, full_response,
+       duration_ms, success, error_message
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [
+      params.groupId,
+      params.auditType,
+      params.model,
+      params.inputTokens ?? null,
+      params.outputTokens ?? null,
+      params.promptSummary ?? null,
+      params.responseSummary ?? null,
+      params.fullPrompt ?? null,
+      params.fullResponse ?? null,
+      params.durationMs ?? null,
+      params.success,
+      params.errorMessage ?? null,
+    ]
+  ).catch((err) => {
+    console.error('[db] logResearchAudit error:', err);
+  });
 }

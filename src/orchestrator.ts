@@ -6,8 +6,8 @@ import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { SKILL_CONTENT } from './skill-prompt.js';
 
-const HAIKU = 'claude-haiku-4-5-20250514';
-const SONNET = 'claude-sonnet-4-6-20250514';
+const HAIKU = 'claude-haiku-4-5-20251001';
+const SONNET = 'claude-sonnet-4-6';
 const MAX_TURNS = 120;
 const COMMAND_TIMEOUT = 60_000;
 
