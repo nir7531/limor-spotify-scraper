@@ -206,6 +206,28 @@ export const BenchmarksSchema = withCommonFields({
 });
 
 // ---------------------------------------------------------------------------
+// youtube_landscape
+// ---------------------------------------------------------------------------
+
+const YouTubeChannelFinding = z.object({
+  channel_name: nonEmptyString,
+  channel_url: z.string().optional(),
+  subscriber_count: z.string().optional(),       // e.g. "10K", "500K" — string to handle approximate
+  upload_frequency: z.string().optional(),        // e.g. "weekly", "2x/month"
+  content_focus: z.string().optional(),
+  engagement_level: z.enum(['high', 'medium', 'low']).optional(),
+  relevance: z.enum(['direct_competitor', 'adjacent', 'global_reference']).optional(),
+  notes: z.string().optional(),
+});
+
+export const YouTubeLandscapeSchema = withCommonFields({
+  findings: z.array(YouTubeChannelFinding).min(1),
+  category_youtube_saturation: z.enum(['high', 'medium', 'low']).optional(),
+  video_length_trend: z.string().optional(),       // e.g. "mostly short-form (<10min)"
+  opportunity_gap: z.string().optional(),          // What's missing in this niche on YouTube
+});
+
+// ---------------------------------------------------------------------------
 // Schema registry
 // ---------------------------------------------------------------------------
 
@@ -217,6 +239,7 @@ const SCHEMA_MAP: Record<string, z.ZodTypeAny> = {
   related_global: RelatedGlobalSchema,
   episode_topics: EpisodeTopicsSchema,
   benchmarks: BenchmarksSchema,
+  youtube_landscape: YouTubeLandscapeSchema,
 };
 
 export type ResearchType = keyof typeof SCHEMA_MAP;

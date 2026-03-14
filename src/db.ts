@@ -243,7 +243,7 @@ export async function getScansSinceLastResearch(groupId: string): Promise<number
     `SELECT COUNT(*) as count
      FROM podcast_scans ps
      WHERE ps.group_id = $1
-       AND ps.status = 'completed'
+       AND ps.scan_status = 'completed'
        AND ps.scan_date > COALESCE(
          (SELECT MAX(pr.refreshed_at) FROM podcast_research pr WHERE pr.group_id = $1),
          '1970-01-01'
@@ -261,12 +261,12 @@ export async function getGroupsNeedingResearch(): Promise<any[]> {
      AND g.group_type = 'client'
      AND (
        -- New clients: have scans but no research
-       (EXISTS (SELECT 1 FROM podcast_scans ps WHERE ps.group_id = g.id AND ps.status = 'completed')
+       (EXISTS (SELECT 1 FROM podcast_scans ps WHERE ps.group_id = g.id AND ps.scan_status = 'completed')
         AND NOT EXISTS (SELECT 1 FROM podcast_research pr WHERE pr.group_id = g.id))
        OR
        -- Existing clients: 4+ scans since last research
        (SELECT COUNT(*) FROM podcast_scans ps
-        WHERE ps.group_id = g.id AND ps.status = 'completed'
+        WHERE ps.group_id = g.id AND ps.scan_status = 'completed'
         AND ps.scan_date > COALESCE(
           (SELECT MAX(pr.refreshed_at) FROM podcast_research pr WHERE pr.group_id = g.id),
           '1970-01-01'
@@ -346,6 +346,71 @@ export async function getEpisodeTitlesForGroup(groupId: string): Promise<{ episo
   return query(
     `SELECT DISTINCT episode_name FROM podcast_episode_rankings WHERE group_id = $1`,
     [groupId]
+  );
+}
+
+// ---- YouTube helper queries ----
+
+export interface YouTubeGroup {
+  id: string;
+  youtube_channel_id: string;
+  youtube_podcast_playlist_id: string | null;
+  client_name: string;
+}
+
+export async function getYouTubeGroups(groupId?: string): Promise<YouTubeGroup[]> {
+  const sql = groupId
+    ? `SELECT id, youtube_channel_id, youtube_podcast_playlist_id, client_name
+       FROM groups WHERE id = $1 AND youtube_channel_id IS NOT NULL`
+    : `SELECT id, youtube_channel_id, youtube_podcast_playlist_id, client_name
+       FROM groups WHERE youtube_channel_id IS NOT NULL AND is_activated = true`;
+  return query<YouTubeGroup>(sql, groupId ? [groupId] : []);
+}
+
+export async function getLastYouTubeScan(): Promise<{
+  scan_date: Date;
+  scan_status: string;
+  successCount: number;
+  failCount: number;
+  failures: string[];
+} | null> {
+  const row = await queryOne<{ scan_date: Date; scan_status: string }>(
+    `SELECT scan_date, scan_status FROM podcast_scans
+     WHERE scan_source IN ('youtube', 'combined')
+     ORDER BY scan_date DESC LIMIT 1`
+  );
+  if (!row) return null;
+  return {
+    scan_date: row.scan_date,
+    scan_status: row.scan_status,
+    successCount: 0,
+    failCount: 0,
+    failures: [],
+  };
+}
+
+export async function getYouTubeGroupCount(): Promise<number> {
+  const row = await queryOne<{ cnt: string }>(
+    `SELECT COUNT(*) as cnt FROM groups WHERE youtube_channel_id IS NOT NULL AND is_activated = true`
+  );
+  return Number(row?.cnt ?? 0);
+}
+
+export async function markCombinedScans(groupIds: string[]): Promise<void> {
+  if (!groupIds.length) return;
+  // Mark the most recent scan for each group as 'combined' if it was 'spotify'
+  await query(
+    `UPDATE podcast_scans ps
+     SET scan_source = 'combined'
+     WHERE ps.group_id = ANY($1)
+       AND ps.scan_source = 'spotify'
+       AND ps.id = (
+         SELECT id FROM podcast_scans
+         WHERE group_id = ps.group_id
+         ORDER BY scan_number DESC
+         LIMIT 1
+       )`,
+    [groupIds]
   );
 }
 

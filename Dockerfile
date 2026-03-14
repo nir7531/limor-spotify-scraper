@@ -7,18 +7,15 @@ RUN apt-get update && apt-get install -y \
     libcairo2 libasound2 libx11-6 libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN corepack enable pnpm
-
 WORKDIR /app
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+COPY package*.json ./
+RUN npm ci
 RUN npx agent-browser install --with-deps
 
 ENV AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage"
 ENV ANTHROPIC_API_KEY=""
 
 COPY . .
-RUN pnpm run build
-RUN cp src/research-skill-content.txt dist/research-skill-content.txt
+RUN npm run build
 
 CMD ["node", "dist/server.js"]

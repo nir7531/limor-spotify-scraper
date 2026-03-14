@@ -252,6 +252,7 @@ Return ONLY a valid JSON array of strings (the queries). No markdown, no explana
     related_global: `Generate 4 English search queries to find the top global podcasts in the "${category}" category.`,
     episode_topics: `Generate 4 search queries (Hebrew + English) to find trending episode topic ideas for a "${category}" podcast.`,
     benchmarks: `Generate 3 search queries to find podcast industry benchmarks and statistics for the "${category}" category.`,
+    youtube_landscape: `Generate 3 search queries to find popular YouTube channels in the "${category}" category in Hebrew/Israel. Include 2 English queries for global YouTube podcasters in the same niche.`,
   };
 
   const guide = queryGuide[researchType] ?? `Generate 4 search queries for "${researchType}" research on a "${category}" podcast.`;
@@ -610,6 +611,35 @@ async function executeApiCalls(
             serperSearch(q, { gl: 'il', hl: 'iw' })
           );
           if (r) results.serper_he = r.organic;
+        })()
+      );
+
+      await Promise.allSettled(calls);
+      break;
+    }
+
+    case 'youtube_landscape': {
+      // YouTube landscape: Serper web search (Hebrew + English) for YouTube channels
+      // Note: YouTube Data API search.list costs 100 units — use Serper as proxy to avoid quota burn
+      const calls: Promise<void>[] = [];
+
+      calls.push(
+        (async () => {
+          const q = hebrewQueries[0] ?? queries[0];
+          const r = await safeCall('serper_he_youtube', () =>
+            serperSearch(`site:youtube.com ${q}`, { gl: 'il', hl: 'iw' })
+          );
+          if (r) results.serper_he = r.organic;
+        })()
+      );
+
+      calls.push(
+        (async () => {
+          const q = englishQueries[0] ?? queries[1] ?? `${showName} YouTube podcast channel`;
+          const r = await safeCall('serper_en_youtube', () =>
+            serperSearch(`site:youtube.com ${q}`, { gl: 'us', hl: 'en' })
+          );
+          if (r) results.serper_en = r.organic;
         })()
       );
 
